@@ -1,0 +1,565 @@
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © nucapadvisoryservices
+
+//@version=5
+indicator(title = "NU Code - Dynamic Zones (April 2023)", shorttitle = "DZS 2", overlay = true, precision = 2, max_bars_back = 500)
+
+//indicator('NU - Theil Sen Regression Line Estimator', overlay=true, max_bars_back=500)
+
+// --- subroutines ---
+allslopes(_n, _y) =>
+    // Get slopes for all pairs of _n data points 
+    // _n :: number of points
+    // _y :: source time series, e.g. close
+    _S = array.new_float(0)
+    if _n > 2
+        for i = 0 to _n - 2 by 1
+            for j = i + 1 to _n - 1 by 1
+                array.push(_S, (_y[i] - _y[j]) / (j - i))
+    _S
+
+rndslopes(_S, _numpoints) =>
+    // Get _numpoints random slopes from array _S
+    // _Srnd :: output array
+    _Srnd = array.new_float(0)
+    int _ntmp = array.size(_S)
+    int _n = _ntmp > _numpoints ? _numpoints : _ntmp
+    int _i = 0
+    int _s1 = 0
+    int _s2 = 0
+    int _s3 = 0
+    float _rnd = na
+    if _n > 2
+        for k = 0 to _n - 1 by 1
+            // use Wichmann–Hill pseudo-random number generator
+            // initial seed values (should be random integer from 0 to 30,000)
+            _s1 := k * int(ohlc4[1])
+            _s1 := k * int(ohlc4[1] + ohlc4[2])
+            _s3 := k * int(ohlc4[3])
+            // generate uniformly distr _rnd (between 0 and 1)
+            _s1 := 171 * (_s1 % 30269)
+            _s2 := 172 * (_s2 % 30269)
+            _s3 := 170 * (_s3 % 30269)
+            _rnd := (float(_s1) / 30269.0 + float(_s2) / 30307.0 + float(_s3) / 30323.0) % 1
+            _i := int(_rnd * _ntmp)
+            // Add element to _Srnd
+            array.push(_Srnd, array.get(_S, _i))
+            // drop chosen element
+            array.remove(_S, _i)
+            _ntmp -= 1
+            _ntmp
+    _Srnd
+
+intercepts(_src, _n, _mslope) =>
+    // Get all intercepts (Y - mslope*X) 
+    // _n :: number of data points
+    // _mslope :: median slope determined by means of TS model
+    _I = array.new_float(0)
+    if _n > 2
+        for i = 0 to _n - 1 by 1
+            array.push(_I, _src[_n - 1 - i] - _mslope * i)
+    _I
+
+
+truncate(_value, _decimals) =>
+    // For output: Truncates a given float to a certain number of decimals
+    _factor = math.pow(10, _decimals)
+    int(_value * _factor) / _factor
+
+rmsd(_src, _x, _a, _b, _n) =>
+    float _rmsd = 0.0
+    for i = 0 to _n - 1 by 1
+        _rmsd += math.pow(_src[i] - _a - _b * (_x - i), 2) / _n
+        _rmsd
+    math.sqrt(_rmsd)
+
+// --- MAIN ---
+len = input.int(title='Length', defval=100, minval=3, maxval=5000, group = "Channel Inputs")
+src = input(title='Source', defval=close, group = "Channel Inputs")
+method = input.string(title='Pair Selection Method', defval='All', options=['All', 'Random'], group = "Channel Inputs")
+numpairs = input.int(title='Number of Pairs (if Method == Random)', defval=500, minval=3, group = "Channel Inputs")
+showinterval = input(title='Show Prediction Interval', defval=true, group = "Channel Inputs")
+mult = input.float(title='Prediction Interval Multiplier', defval=2, minval=0.1, step=0.5, group = "Channel Inputs")
+showresult = input(title='Show Intercept', defval=true, group = "Channel Inputs")
+colup = input(title='Color Up', defval=color.green, group = "Channel Inputs")
+coldw = input(title='Color Down', defval=color.red, group = "Channel Inputs")
+colbr = input(title='Channel Break Color', defval=color.orange, group = "Channel Inputs")
+lw = input(title='Line Width', defval=2, group = "Channel Inputs")
+extendln = input(title='Extend Line', defval=true, group = "Channel Inputs")
+
+// get TS estimate only for the last barstate
+if not barstate.islast
+    len := 0
+    len
+
+S = allslopes(len, src)
+if method == 'Random'
+    S := rndslopes(S, numpairs)
+    S
+mslope = array.median(S)
+I = intercepts(src, len, mslope)
+minter = array.median(I)
+
+// apply estimator
+x = bar_index
+x1 = x - len
+x2 = x
+y1 = minter
+y2 = minter + mslope * (len - 1)
+
+//estimate prediction interval (as \pm mult*RMSD)
+float rmse = 0.0
+if len > 0
+    for j = 0 to len - 1 by 1
+        rmse += math.pow(src[j] - (minter + mslope * (len - j)), 2) / len
+        rmse
+dev = mult * math.sqrt(rmse)
+
+// check if channel is broken
+isbroken = src > y2 + dev or src < y2 - dev
+
+// plot results
+line a1 = line.new(x1, y1, x2, y2, xloc.bar_index, extend=extendln ? extend.right : extend.none, color=isbroken ? colbr : mslope > 0 ? colup : coldw, width=lw)
+line.delete(a1[1])
+if showinterval
+    line ap = line.new(x1, y1 + dev, x2, y2 + dev, xloc.bar_index, extend=extendln ? extend.right : extend.none, color=isbroken ? colbr : mslope > 0 ? colup : coldw, width=1, style=line.style_dashed)
+    line am = line.new(x1, y1 - dev, x2, y2 - dev, xloc.bar_index, extend=extendln ? extend.right : extend.none, color=isbroken ? colbr : mslope > 0 ? colup : coldw, width=1, style=line.style_dashed)
+    line.delete(ap[1])
+    line.delete(am[1])
+if showresult and barstate.islast
+    label b = label.new(bar_index - (len - 1), mslope > 0 ? y1 - dev : y1 + dev, style=mslope > 0 ? label.style_label_up : label.style_label_down, text=' Intercept ' + str.tostring(truncate(minter, 2)), color=mslope > 0 ? colup : coldw, textcolor=color.new(color.white,0))
+    label.delete(b[1])
+
+// End
+
+// Dynamic Zone Inputs
+oscSrc_DZ = input(defval = close, title = "Oscillator Source", inline="Dynamic Zones", group = "Dynamic Zone Settings")
+dataSmple = input.int(defval = 72, title = "Sample Length", minval = 1, inline="Dynamic Zones", group = "Dynamic Zone Settings")
+pcntAbove = input.float(defval = 88, title = "Hi is Above X% of Sample", minval = 0, maxval = 100, step = 1.0, inline="Dynamic Zones", group = "Dynamic Zone Settings")
+pcntBelow = input.float(defval = 88, title = "Lo is Below X% of Sample", minval = 0, maxval = 100, step = 1.0, inline="Dynamic Zones", group = "Dynamic Zone Settings")
+minRangePct = input.float(defval = 20, title = "Min. Range Width (%)", minval = 1, maxval = 100, step = 1.0, inline="Dynamic Zones", group = "Dynamic Zone Settings")
+
+above_clr       = input.color(color(na), "Above", inline="Dynamic Zones", group = "Dynamic Zone Settings")
+OB_Line_clr     = input.color(color.new(color.red, 0), "OB Line", inline="Dynamic Zones", group = "Dynamic Zone Settings")
+Mid_Line_clr    = input.color(#d1d4dc, "Mid Line", inline="Dynamic Zones", group = "Dynamic Zone Settings")
+OS_Line_clr     = input.color(color.new(color.green, 0), "OS Line", inline="Dynamic Zones", group = "Dynamic Zone Settings")
+below_clr       = input.color(color(na), "Below", inline="Dynamic Zones", group = "Dynamic Zone Settings")
+
+show_crossovers = input.bool(true, "Plot Crossovers")
+show_stf_signals = input.bool(true, "Show STF Signals?")
+show_htf_signals = input.bool(true, "Show HTF Signals?")
+show_RSI_MFI_Signals = input.bool(true, "Show RSI & MFI Signals?")
+
+// Resolution Inputs
+CurrentRes_DZ = input(false, title='Use Current Chart Resolution?', group = "Dynamic Zone Settings")
+CustomRes_DZ = input.timeframe('15', title='Custom Timeframe?', group = "Dynamic Zone Settings")
+
+// Calculation
+res_DZ = CurrentRes_DZ ? timeframe.period : CustomRes_DZ
+oscSrc = request.security(syminfo.tickerid, res_DZ, oscSrc_DZ)
+smplAbove = ta.percentile_nearest_rank(oscSrc, dataSmple, pcntAbove)
+smplBelow = ta.percentile_nearest_rank(oscSrc, dataSmple, 100 - pcntBelow)
+smplMid = (smplAbove + smplBelow) / 2
+oscRange = ta.highest(oscSrc, dataSmple) - ta.lowest(oscSrc, dataSmple)
+rangeWidthPct = (smplAbove - smplBelow) / oscRange * 100
+
+// Dynamic Zone Plots
+above     = plot(oscSrc > smplAbove ? oscSrc : smplAbove, title = "Above", color = above_clr)
+probOB    = plot(smplAbove, title = "OB Line", color = OB_Line_clr)
+probMid   = plot(smplMid, title = "Mid Line", color = Mid_Line_clr)
+probOS    = plot(smplBelow, title = "OS Line", color = OS_Line_clr)
+below     = plot(oscSrc < smplBelow ? oscSrc : smplBelow, title = "Below", color = below_clr)
+
+fill(above,  probOB, color = color.new(#00FF00, 80))
+fill(probOB, probOS, color = color.new(#9915ff, 95))
+fill(below,  probOS, color = color.new(#FF0000, 80))
+
+//@version=5
+//indicator("EMA Suite", overlay=true)
+
+// EMA Suite
+source = input(close, "EMA Source", group="EMA Inputs")
+ema_short_len = input.int(9, minval=1, title='Short EMA Length', group="EMA Inputs")
+ema_long_len = input.int(21, minval=1, title='Long EMA Length', group="EMA Inputs")
+ema_longest_len = input.int(72, title = "Longest EMA Length", group = "EMA Inputs")
+
+show_ema_lines = input.bool(false, "Show EMA Lines?", group= "EMA Inputs")
+
+// Resolution Inputs
+CurrentRes_EMA = input(false, title='Use Current Chart Resolution?', group = "EMA Inputs")
+CustomRes_EMA = input.timeframe('15', title='Custom Timeframe?', group = "EMA Inputs")
+
+res_EMA = CurrentRes_EMA ? timeframe.period : CustomRes_EMA
+
+ema_src= request.security(syminfo.tickerid, res_EMA, source)
+
+ema_short = ta.ema(ema_src, ema_short_len)
+ema_long = ta.ema(ema_src, ema_long_len)
+ema_longest = ta.ema(ema_src, ema_longest_len)
+
+plot(show_ema_lines ? ema_short : na, title = "Short EMA", color = color.new(color.red, 0), linewidth=2)
+plot(show_ema_lines ? ema_long : na, title = "Long EMA", color = color.new(color.blue, 0), linewidth=2)
+plot(show_ema_lines ? ema_longest : na, title = "Longest EMA", color = color.new(color.yellow, 0), linewidth=2)
+
+// End
+
+//indicator('EMA on Alternative Timeframe', shorttitle='EMA - Alt. TF', overlay=true)
+
+tf_1H = input.timeframe('180', title='For 1-hour chart, show EMA of: ', group = "Alt EMA Inputs")
+tf_15 = input.timeframe('60', title='For 15-min chart, show EMA of: ', group = "Alt EMA Inputs")
+tf_5 = input.timeframe('15', title='For 5-min chart, show EMA of: ', group = "Alt EMA Inputs")
+tf_default = input.timeframe("", title='For others (Default)', group = "Alt EMA Inputs")
+
+tf = timeframe.period                                                               // tf = timeframe of the viewed chart
+tf_alt = tf == '60' ? tf_1H : tf == '45' ? tf_15 : tf == '5' ? tf_5 : tf_default   // alternative timeframe depends on 'tf'
+
+len_alt_EMA = input.int(defval=50, title='EMA Period', minval=1, group = "Alt EMA Inputs")
+_data = ta.ema(close, len_alt_EMA)
+data = request.security(syminfo.tickerid, tf_alt, _data)
+plot(data, title="Alt. EMA", color=color.new(#d7da00, 0), linewidth=2, style=plot.style_line)
+
+// End
+
+//indicator('Triangular MA', shorttitle='NU Code 3.22', overlay=true)
+
+source_TMA = input(close, title = "Source", group = "Triangular MA Inputs")
+len_TMA = input(27, title='Length', group = "Triangular MA Inputs")
+s = input(14, title='Shifted Periods', group = "Triangular MA Inputs")
+fact = input.float(0.13, step=0.01, title='Factor', group = "Triangular MA Inputs")
+
+show_TMA = input.bool(true, "Plot TMA?")
+
+CurrentRes_TMA = input(false, title='Use Current Chart Resolution?', group = "Triangular MA Inputs")
+CustomRes_TMA = input.timeframe('15', title='Custom Timeframe?', group = "Triangular MA Inputs")
+
+res_TMA = CurrentRes_TMA ? timeframe.period : CustomRes_TMA
+
+calc_src = request.security(syminfo.tickerid, res_TMA, source_TMA)
+
+// Calulations
+sma = ta.sma(calc_src, len_TMA)
+sum = 0.0
+for i = 0 to len_TMA - 1 by 1
+    sum += sma[i]
+    sum
+
+a = sum / len_TMA
+b = a[s]
+
+atx = ta.atr(13)
+factor = atx * fact
+
+TMA_High = b + factor
+TMA_Low = b - factor
+
+TMA = plot(show_TMA ? b : na, title='TMA Mid', color=color.new(color.fuchsia, 0))
+High_TMA = plot(show_TMA ? TMA_High : na, title='TMA High', color=color.new(color.fuchsia, 0))
+Low_TMA = plot(show_TMA ? TMA_Low : na, title='TMA Low', color=color.new(color.fuchsia, 0))
+
+fill(High_TMA,Low_TMA, color=color.new(color.fuchsia, 0))
+
+// Determine trend direction
+
+source_Trend_Dir = input.source(close, title = "Source", group = "Trend Direction")
+lookback_length = input.int(200, minval=1, title="Lookback Length", group = "Trend Direction")
+smoother_length = input.int(3, minval=1, title="Smoother Length", group = "Trend Direction")
+atr_length = input.int(10, minval=1, title="ATR Length", group = "Trend Direction")
+atr_multiplier = input.float(0.5, minval=0.0, title="ATR Multiplier", group = "Trend Direction")
+
+CurrentRes_Trend_Dir = input(false, title='Use Current Chart Resolution?', group = "Trend Direction")
+CustomRes_Trend_Dir = input.timeframe('15', title='Custom Timeframe?', group = "Trend Direction")
+
+res_Trend_Dir = CurrentRes_Trend_Dir ? timeframe.period : CustomRes_Trend_Dir
+
+vola = ta.atr(atr_length) * atr_multiplier
+price = ta.sma(request.security(syminfo.tickerid, res_Trend_Dir, source_Trend_Dir), 3)
+
+ema_l = ta.ema(ta.lowest(low, lookback_length), smoother_length)
+ema_h = ta.ema(ta.highest(high, lookback_length), smoother_length)
+ema_center = (ema_h + ema_l) * 0.5
+upper = ema_center + vola
+lower = ema_center - vola
+trend = ta.ema(price > upper ? 1 : (price < lower ? -1 : 0), 3)
+
+// End
+
+//indicator("NU Code 3.3 - Divergence on Price Charts", shorttitle="Divergences", overlay = true)
+
+CurrentRes = input(title='Use Current Chart Resolution?', defval=true, group = "Main Inputs")
+CustomRes = input.timeframe(title='Custom Timeframe?', defval='15', group = "Main Inputs")
+
+res = CurrentRes ? timeframe.period : CustomRes
+
+//Divergence Inputs
+
+lbR = input(title="Pivot Lookback Right", defval=5, group="Divergence Inputs")
+lbL = input(title="Pivot Lookback Left", defval=5, group="Divergence Inputs")
+rangeUpper = input(title="Max of Lookback Range", defval=60, group="Divergence Inputs")
+rangeLower = input(title="Min of Lookback Range", defval=5, group="Divergence Inputs")
+
+// Plot Options
+plotBull = input(title="Plot Bullish", defval=true)
+plotHiddenBull = input(title="Plot Hidden Bullish", defval=true)
+plotBear = input(title="Plot Bearish", defval=true)
+plotHiddenBear = input(title="Plot Hidden Bearish", defval=true)
+
+// Color Scheme
+bearColor = color.red
+bullColor = color.green
+hiddenBullColor = color.new(color.green, 30)
+hiddenBearColor = color.new(color.red, 30)
+textColor = color.white
+noneColor = color.new(color.white, 100)
+
+// MFI Inputs
+mfi_src = input.source(defval = hlc3, title = "Source", group = "MFI Inputs")
+length = input(title='Length', defval=14, group = "MFI Inputs")
+
+// MFI Calculation
+rawMoneyFlow = request.security(syminfo.tickerid, res, mfi_src) * volume
+
+positiveMoneyFlow() => 
+    a_pos = 0.0
+    a_pos := mfi_src > mfi_src[1] ? a_pos + rawMoneyFlow : a_pos
+    a_pos
+
+negativeMoneyFlow() =>
+    b_neg = 0.0
+    b_neg := mfi_src < mfi_src[1] ? b_neg + rawMoneyFlow : b_neg
+    b_neg
+
+moneyFlowRatio = ta.sma(positiveMoneyFlow(), length) / ta.sma(negativeMoneyFlow(), length)
+
+moneyFlowIndex = request.security(syminfo.tickerid, res, 100 - 100 / (1 + moneyFlowRatio))
+
+// MFI Divergence Calculations
+
+plFound = na(ta.pivotlow(moneyFlowIndex, lbL, lbR)) ? false : true
+phFound = na(ta.pivothigh(moneyFlowIndex, lbL, lbR)) ? false : true
+_inRange(cond) =>
+	bars = ta.barssince(cond == true)
+	rangeLower <= bars and bars <= rangeUpper
+
+//------------------------------------------------------------------------------
+// Regular Bullish
+// Osc: Higher Low
+
+oscHL = moneyFlowIndex[lbR] > ta.valuewhen(plFound, moneyFlowIndex[lbR], 1) and _inRange(plFound[1])
+
+// Price: Lower Low
+
+priceLL = request.security(syminfo.tickerid, res, low[lbR] < ta.valuewhen(plFound, low[lbR], 1))
+bullCond = plotBull and priceLL and oscHL and plFound
+
+plotshape(
+	 show_RSI_MFI_Signals and bullCond ? moneyFlowIndex[lbR] : na,
+	 offset=-lbR,
+	 title="Regular MFI Bullish Label",
+	 text=" Bull MFI ",
+	 style=shape.labelup,
+	 location=location.belowbar,
+	 color=bullColor,
+	 textcolor=textColor
+	 )
+
+//------------------------------------------------------------------------------
+// Hidden Bullish
+// Osc: Lower Low
+
+oscLL = moneyFlowIndex[lbR] < ta.valuewhen(plFound, moneyFlowIndex[lbR], 1) and _inRange(plFound[1])
+
+// Price: Higher Low
+
+priceHL = request.security(syminfo.tickerid, res, low[lbR] > ta.valuewhen(plFound, low[lbR], 1))
+hiddenBullCond = plotHiddenBull and priceHL and oscLL and plFound
+
+plotshape(
+	 show_RSI_MFI_Signals and hiddenBullCond ? moneyFlowIndex[lbR] : na,
+	 offset=-lbR,
+	 title="Hidden MFI Bullish Label",
+	 text=" H Bull MFI ",
+	 style=shape.labelup,
+	 location=location.belowbar,
+	 color=bullColor,
+	 textcolor=textColor
+	 )
+
+//------------------------------------------------------------------------------
+// Regular Bearish
+// Osc: Lower High
+
+oscLH = moneyFlowIndex[lbR] < ta.valuewhen(phFound, moneyFlowIndex[lbR], 1) and _inRange(phFound[1])
+
+// Price: Higher High
+
+priceHH = request.security(syminfo.tickerid, res, high[lbR] > ta.valuewhen(phFound, high[lbR], 1))
+
+bearCond = plotBear and priceHH and oscLH and phFound
+
+plotshape(
+	 show_RSI_MFI_Signals and bearCond ? moneyFlowIndex[lbR] : na,
+	 offset=-lbR,
+	 title="Regular MFI Bearish Label",
+	 text=" Bear MFI ",
+	 style=shape.labeldown,
+	 location=location.abovebar,
+	 color=bearColor,
+	 textcolor=textColor
+	 )
+
+//------------------------------------------------------------------------------
+// Hidden Bearish
+// Osc: Higher High
+
+oscHH = moneyFlowIndex[lbR] > ta.valuewhen(phFound, moneyFlowIndex[lbR], 1) and _inRange(phFound[1])
+
+// Price: Lower High
+
+priceLH = request.security(syminfo.tickerid, res, high[lbR] < ta.valuewhen(phFound, high[lbR], 1))
+
+hiddenBearCond = plotHiddenBear and priceLH and oscHH and phFound
+
+plotshape(
+	 show_RSI_MFI_Signals and hiddenBearCond ? moneyFlowIndex[lbR] : na,
+	 offset=-lbR,
+	 title="Hidden MFI Bearish Label",
+	 text=" H Bear MFI ",
+	 style=shape.labeldown,
+	 location=location.abovebar,
+	 color=bearColor,
+	 textcolor=textColor
+	 )
+// End
+
+//RSI Inputs
+
+RSI_src = input(close, 'Source', group="RSI Inputs")
+len_RSI = input.int(14, minval=1, title='RSI Length', group="RSI Inputs")
+
+// RSI Calculations
+src_RSI = request.security(syminfo.tickerid, res, RSI_src)
+rsi = ta.wma(ta.rsi(src_RSI, len_RSI), 5)
+
+plFound_RSI = na(ta.pivotlow(rsi, lbL, lbR)) ? false : true
+phFound_RSI = na(ta.pivothigh(rsi, lbL, lbR)) ? false : true
+_inRange_RSI(cond) =>
+	bars_RSI = ta.barssince(cond == true)
+	rangeLower <= bars_RSI and bars_RSI <= rangeUpper
+
+//------------------------------------------------------------------------------
+// Regular Bullish
+// Osc: Higher Low
+
+oscHL_RSI = rsi[lbR] > ta.valuewhen(plFound_RSI, rsi[lbR], 1) and _inRange_RSI(plFound_RSI[1])
+
+// Price: Lower Low
+
+priceLL_RSI = request.security(syminfo.tickerid, res, low[lbR] < ta.valuewhen(plFound_RSI, low[lbR], 1))
+bullCond_RSI = plotBull and priceLL_RSI and oscHL_RSI and plFound_RSI
+
+plotshape(
+	 show_RSI_MFI_Signals and bullCond ? rsi[lbR] : na,
+	 offset=-lbR,
+	 title="Regular Bullish Label RSI",
+	 text=" Bull RSI ",
+	 style=shape.labelup,
+	 location=location.belowbar,
+	 color=bullColor,
+	 textcolor=textColor
+	 )
+
+//------------------------------------------------------------------------------
+// Hidden Bullish
+// Osc: Lower Low
+
+oscLL_RSI = rsi[lbR] < ta.valuewhen(plFound_RSI, rsi[lbR], 1) and _inRange_RSI(plFound_RSI[1])
+
+// Price: Higher Low
+
+priceHL_RSI = request.security(syminfo.tickerid, res, low[lbR] > ta.valuewhen(plFound_RSI, low[lbR], 1))
+
+hiddenBullCond_RSI = plotHiddenBull and priceHL_RSI and oscLL_RSI and plFound_RSI
+
+plotshape(
+	 show_RSI_MFI_Signals and hiddenBullCond_RSI ? rsi[lbR] : na,
+	 offset=-lbR,
+	 title="Hidden Bullish Label RSI",
+	 text=" H Bull RSI ",
+	 style=shape.labelup,
+	 location=location.belowbar,
+	 color=bullColor,
+	 textcolor=textColor
+	 )
+
+//------------------------------------------------------------------------------
+// Regular Bearish
+// Osc: Lower High
+
+oscLH_RSI = rsi[lbR] < ta.valuewhen(phFound_RSI, rsi[lbR], 1) and _inRange_RSI(phFound_RSI[1])
+
+// Price: Higher High
+
+priceHH_RSI = request.security(syminfo.tickerid, res, high[lbR] > ta.valuewhen(phFound_RSI, high[lbR], 1))
+
+bearCond_RSI = plotBear and priceHH_RSI and oscLH_RSI and phFound_RSI
+
+plotshape(
+	 show_RSI_MFI_Signals and bearCond_RSI ? rsi[lbR] : na,
+	 offset=-lbR,
+	 title="Regular Bearish Label RSI",
+	 text=" Bear RSI ",
+	 style=shape.labeldown,
+	 location=location.abovebar,
+	 color=bearColor,
+	 textcolor=textColor
+	 )
+
+//------------------------------------------------------------------------------
+// Hidden Bearish
+// Osc: Higher High
+
+oscHH_RSI = rsi[lbR] > ta.valuewhen(phFound_RSI, rsi[lbR], 1) and _inRange_RSI(phFound_RSI[1])
+
+// Price: Lower High
+
+priceLH_RSI = request.security(syminfo.tickerid, res, high[lbR] < ta.valuewhen(phFound_RSI, high[lbR], 1))
+
+hiddenBearCond_RSI = plotHiddenBear and priceLH_RSI and oscHH_RSI and phFound_RSI
+
+plotshape(
+	 show_RSI_MFI_Signals and hiddenBearCond_RSI ? rsi[lbR] : na,
+	 offset=-lbR,
+	 title="Hidden Bearish Label RSI",
+	 text=" H Bear RSI ",
+	 style=shape.labeldown,
+	 location=location.abovebar,
+	 color=bearColor,
+	 textcolor=textColor
+	 )
+// End
+
+// Buy & Sell Signals
+buy_strong = close > TMA_High and close > smplMid and trend > 0 
+sell_strong = close < TMA_Low and trend < 0
+
+buy_strong_2 = ta.crossover(ema_short, data) 
+sell_strong_2 = ta.crossunder(ema_short, data)
+
+
+buy_short_term = close > TMA_Low and close > smplBelow and close > ema_short
+sell_short_term = close < smplAbove
+
+ignore_buy_short_term = close < ema_longest and ema_longest > TMA_High
+ignore_sell_short_term = close > close[1]
+
+// Plot signals
+plotshape(show_htf_signals and buy_strong and not buy_strong[1], title="Strong Long Signal", text="Go Long", textcolor=color.new(color.black, 0), location=location.belowbar, color=color.new(color.lime, 0), style=shape.triangleup, size=size.small)
+plotshape(show_htf_signals and sell_strong and not sell_strong[1], title="Strong Short Signal", text="Go Short", textcolor=color.new(color.black, 0), location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.small)
+
+plotshape(show_htf_signals and buy_strong_2 and not buy_strong_2[1], title="Strong Long Signal 2", text="Go Long 2", textcolor=color.new(color.black, 0), location=location.belowbar, color=color.new(color.lime, 0), style=shape.triangleup, size=size.small)
+plotshape(show_htf_signals and sell_strong_2 and not sell_strong_2[1], title="Strong Short Signal 2", text="Go Short 2", textcolor=color.new(color.black, 0), location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.small)
+
+plotshape(show_stf_signals and buy_short_term and not buy_short_term[1] and ignore_buy_short_term==false, title="Medium Buy Signal", text="Buy", textcolor=color.new(color.lime, 0), location=location.belowbar, color=color.new(color.lime, 0), style=shape.triangleup, size=size.tiny)
+plotshape(show_stf_signals and sell_short_term and not sell_short_term[1] and ignore_sell_short_term==false, title="Medium Sell Signal", text="Sell", textcolor=color.new(color.red, 0), location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.tiny)
+
+// End
